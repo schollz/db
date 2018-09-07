@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+require 'pg'
+
+db = PG::Connection.new(dbname: 'd50b', user: 'd50b')
+
+lang = 'en'
+Dir.mkdir("/tmp/#{lang}.lproj")
+File.open("/tmp/#{lang}.lproj/Localizable.strings", 'w') do |f|
+	qry = "SELECT code, sentence, comment FROM words.sentences WHERE article_id = 30 ORDER BY code"
+	db.exec(qry).each do |row|
+		f.puts '/* %s */' % row['comment']
+		f.puts '"%s" = "%s";' % [row['code'], row['sentence']]
+		f.puts "\n"
+	end
+end
+
+langs = %w(fr es pt de it zh ja ru)
+
+langs.each do |lang|
+	Dir.mkdir("/tmp/#{lang}.lproj")
+	File.open("/tmp/#{lang}.lproj/Localizable.strings", 'w') do |f|
+		qry = "SELECT s.code, s.comment, t.translation
+			FROM words.translations t
+			JOIN words.sentences s ON t.sentence_code = s.code
+			WHERE s.article_id=30
+			AND t.lang='%s' ORDER BY s.code" % lang
+		db.exec(qry).each do |row|
+			f.puts '/* %s */' % row['comment']
+			f.puts '"%s" = "%s";' % [row['code'], row['translation']]
+			f.puts "\n"
+		end
+	end
+end

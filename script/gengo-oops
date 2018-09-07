@@ -1,0 +1,34 @@
+#!/usr/bin/env ruby
+require 'pg'
+require 'gengo'
+require 'json'
+
+db = PG::Connection.new(dbname: 'd50b', user: 'd50b')
+pub = db.exec("SELECT v FROM core.configs WHERE k='gengo_public'")[0]['v']
+pri = db.exec("SELECT v FROM core.configs WHERE k='gengo_private'")[0]['v']
+GG = Gengo::API.new(public_key: pub, private_key: pri, sandbox: false)
+
+# get un-imported translation_orders
+res = db.exec("SELECT * FROM words.translation_orders")
+res.each do |translation_order|
+
+	# check on that order
+	order = GG.jobs_in_order(translation_order['id'])['response']['order']
+	puts order
+
+	# next translation_order unless all the jobs in this order are reviewable
+	job_ids = order['jobs_approved'].map(&:to_i)
+
+	# get each job
+	job_ids.each do |job_id|
+		puts "getting job #{job_id}"
+		job = GG.getTranslationJob(id: job_id)['response']['job']
+		
+		db.exec_params('INSERT INTO words.translations (sentence_code, lang, translation) VALUES ($1, $2, $3)', [
+			job['custom_data'],
+			translation_order['lang'],
+			job['body_tgt']])
+
+	end
+end
+

@@ -1,0 +1,302 @@
+-- OUTPUT: 'new', 'started', 'review', 'reviewing', 'done'
+-- PARAMS: text array
+CREATE OR REPLACE FUNCTION words.article_array_state(text[], OUT stat text) AS $$
+BEGIN
+	stat := 'unknown';  -- should not happen
+	-- if translations are all/only 'new': article stat 'new'
+	IF $1 = ARRAY['new'] THEN
+		stat := 'new';
+	-- if translations are all/only 'review': article stat 'review'
+	ELSIF $1 = ARRAY['review'] THEN
+		stat := 'review';
+	-- if translations are all/only 'done': article stat 'done'
+	ELSIF $1 = ARRAY['done'] THEN
+		stat := 'done';
+	-- if any translations are 'wait': article stat 'wait'
+	ELSIF $1 @> ARRAY['wait'] THEN
+		stat := 'wait';
+	-- if any translations are 'new': article stat 'started'
+	ELSIF $1 @> ARRAY['new'] THEN
+		stat := 'started';
+	-- if any translations are 'done': article stat 'reviewing'
+	ELSIF $1 @> ARRAY['done'] THEN
+		stat := 'reviewing';
+	-- if any translations are 'review': article stat 'reviewing'
+	ELSIF $1 @> ARRAY['review'] THEN
+		stat := 'reviewing';
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- OUTPUT: 'new', 'started', 'review', 'reviewing', 'done'
+-- PARAMS: article.id, lang
+CREATE OR REPLACE FUNCTION words.article_state(integer, char(2), OUT stat text) AS $$
+DECLARE
+	states text[];
+BEGIN
+	-- get all states as array for comparing (instead of querying many times)
+	SELECT array_agg(DISTINCT(state::text))
+		INTO states
+		FROM words.translations
+		WHERE sentence_code IN (
+			SELECT code
+			FROM words.sentences
+			WHERE article_id = $1
+		) AND lang = $2;
+	SELECT x.stat
+		INTO stat
+		FROM words.article_array_state(states) x;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+-- PARAMS: translator.id -- RETURNS TABLE of article_id + state from above
+CREATE OR REPLACE FUNCTION words.translator_art_state(integer)
+	RETURNS TABLE (article_id smallint, stat text) AS $$
+BEGIN
+	RETURN QUERY
+		SELECT s.article_id,
+			words.role_state(t.role,
+				words.article_array_state(array_agg(distinct(a.state)))
+			) AS stat
+			FROM words.sentences s
+			JOIN words.translations a
+				ON s.code=a.sentence_code
+			JOIN words.translators t
+				ON t.id = $1
+			WHERE a.lang=t.lang
+			AND sentence_code IN (
+				SELECT code
+				FROM words.sentences
+				WHERE sentences.article_id IN (
+						SELECT at.article_id
+						FROM words.articles_translators at
+						WHERE translator_id = $1
+					)
+				)
+			GROUP BY s.article_id, t.role;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- For 1st translator, state new=do, started=doing, review=done, reviewing=done
+-- For 2nd translator, state new=wait, started=wait, review=do, reviewing=doing
+-- For all, done=done & wait=wait
+-- PARAMS: translator.role, article_state from above functions
+-- OUT = 'wait', 'do', 'doing', or 'done'
+CREATE OR REPLACE FUNCTION words.role_state(char(3), text) RETURNS text AS $$
+BEGIN
+	IF $2 = 'done' THEN RETURN 'done'; END IF;
+	IF $2 = 'wait' THEN RETURN 'wait'; END IF;
+	IF $1 = '1st' THEN
+		IF $2 = 'new' THEN RETURN 'do'; END IF;
+		IF $2 = 'started' THEN RETURN 'doing'; END IF;
+		IF $2 = 'review' OR $2 = 'reviewing' THEN RETURN 'done'; END IF;
+	ELSE
+		IF $2 = 'new' OR $2 = 'started' THEN RETURN 'wait'; END IF;
+		IF $2 = 'review' THEN RETURN 'do'; END IF;
+		IF $2 = 'reviewing' THEN RETURN 'doing'; END IF;
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION words.article_lang_done(integer, char(2)) RETURNS boolean AS $$
+DECLARE
+	howmany_sentences integer;
+	howmany_translations integer;
+BEGIN
+	SELECT COUNT(*) INTO howmany_sentences
+		FROM words.sentences
+		WHERE article_id = $1;
+	SELECT COUNT(*) INTO howmany_translations
+		FROM words.translations
+		WHERE sentence_code IN (
+			SELECT code
+			FROM words.sentences
+			WHERE article_id = $1
+		)
+		AND lang = $2
+		AND state='done';                             
+	IF (howmany_sentences = howmany_translations) THEN
+		RETURN true;
+	ELSE
+		RETURN false;
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+-- use when updating translation or marking as finished,
+-- mainly to check permissions but also, if finished, to know next state based on role
+-- PARAMS: translators.id, translations.id
+-- OUT: next state (if finished) or NULL if not allowed  (if "done" then never allowed!)
+CREATE OR REPLACE FUNCTION words.translator_translation_ok(integer, integer) RETURNS text AS $$
+DECLARE
+	rrole char(3);
+	tstate varchar(6);
+BEGIN
+	-- what a weird query! so many tables, but not joined. test the hell out of this:
+	SELECT r.role, t.state INTO rrole, tstate
+	FROM words.articles_translators at,
+		words.translators r,
+		words.sentences s,
+		words.translations t
+	WHERE at.translator_id = $1
+	AND r.id = $1
+	AND t.id = $2
+	AND s.code = t.sentence_code
+	AND at.article_id = s.article_id
+	AND t.lang = r.lang;  
+	-- if not found in above query, or translation is done, NULL
+	IF rrole IS NULL OR tstate IS NULL OR tstate = 'done' THEN
+		RETURN NULL;
+	END IF;
+	-- if waiting on question, they can keep updating it
+	IF tstate = 'wait' THEN
+		RETURN 'wait';
+	ELSIF rrole = '1st' AND tstate = 'new' THEN
+		RETURN 'review';
+	ELSIF rrole = '2nd' AND tstate = 'review' THEN
+		RETURN 'done';
+	ELSE
+		RETURN NULL;
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+-- PARAMS: translations.id
+-- RETURNS: article_id
+CREATE OR REPLACE FUNCTION words.article_for_translation(integer) RETURNS smallint AS $$
+	SELECT s.article_id
+	FROM words.translations t
+	JOIN words.sentences s
+		ON t.sentence_code = s.code
+	WHERE t.id = $1;
+$$ LANGUAGE SQL;
+
+
+
+-- PARAMS: translations.id
+-- RETURNS: next translation_id in sequence after this. NULL if none
+CREATE OR REPLACE FUNCTION words.next_translation(integer,
+	OUT translation_id integer) AS $$
+DECLARE
+	next_code char(8);
+BEGIN
+	-- first see if there's a next code
+	SELECT code INTO next_code
+	FROM words.sentences
+	WHERE article_id = words.article_for_translation($1)
+	AND sortid > (
+		SELECT sortid
+		FROM words.sentences
+		WHERE code = (
+			SELECT sentence_code
+			FROM words.translations
+			WHERE id = $1
+		)
+	)
+	ORDER BY sortid
+	LIMIT 1;
+	-- if not, return NULL
+	IF next_code IS NULL THEN
+		translation_id := NULL;
+	ELSE
+		-- if so, use code + existing lang to find next translation
+		SELECT id INTO translation_id
+		FROM words.translations
+		WHERE sentence_code = next_code
+		AND lang = (
+			SELECT lang
+			FROM words.translations
+			WHERE id = $1
+		);
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+-- PARAMS: translations.id
+-- for router to send translator to article and translation if there was an error
+CREATE OR REPLACE FUNCTION words.next_if_bad(integer,
+	OUT article_id smallint, OUT translation_id integer) AS $$
+BEGIN
+	SELECT x.article_id INTO article_id FROM words.article_for_translation($1) x;
+	translation_id := $1;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+-- PARAMS: translations.id
+-- for router to send translator to article and translation if this one was successful
+CREATE OR REPLACE FUNCTION words.next_if_good(integer,
+	OUT article_id smallint, OUT translation_id integer) AS $$
+BEGIN
+	SELECT x.article_id INTO article_id FROM words.article_for_translation($1) x;
+	SELECT y.translation_id INTO translation_id FROM words.next_translation($1) y;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- updates either the translated_by or reviewed_by depending on translators.role
+-- PARAMS: translations.id, translators.id
+CREATE OR REPLACE FUNCTION words.translation_belongs_to(integer, integer) RETURNS integer AS $$
+DECLARE
+	this_role char(3);
+BEGIN
+	SELECT role INTO this_role
+	FROM words.translators
+	WHERE id = $2;
+	IF this_role = '1st' THEN
+		UPDATE words.translations
+		SET translated_by = $2
+		WHERE id = $1;
+	ELSIF this_role = '2nd' THEN
+		UPDATE words.translations
+		SET reviewed_by = $2
+		WHERE id = $1;
+	ELSE
+		 RAISE 'role not 1st or 2nd?';
+	END IF;
+	RETURN $1;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION words.ion_init_collection_lang(integer, char(2)) RETURNS boolean AS $$
+DECLARE
+	rowcount integer;
+BEGIN
+	SELECT COUNT(*) INTO rowcount
+	FROM words.translations
+	WHERE lang = $2
+	AND sentence_code IN (
+		SELECT code
+		FROM words.sentences s
+		JOIN words.articles a
+			ON s.article_id=a.id
+		WHERE a.collection_id = $1
+	);
+	IF rowcount > 0 THEN
+		RETURN false;
+	ELSE
+		INSERT INTO words.translations(sentence_code, lang)
+		SELECT s.code, $2
+		FROM words.sentences s
+		JOIN words.articles a
+			ON s.article_id=a.id
+		WHERE a.collection_id = $1
+		ORDER BY a.id, s.sortid;
+		RETURN true;
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+

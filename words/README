@@ -1,0 +1,134 @@
+# WORDS schema : for translations
+
+SHORTCUTS IN FUNCTION NAMES (because I got sick of typing "translat" so many times): translator = xor, translation = xion, collections_translators = coltranes
+
+progress =# SELECT lang, COUNT(*) FROM words.translations WHERE translated_at IS NOT NULL AND id > 3960 GROUP BY lang ORDER BY COUNT(*) DESC;
+
+
+Fri Jul  6 13:15:44 NZST 2018 = ***WHAT ABOUT QUESTIONS?***
+
+Make special status : "your question is answered : do now" - if it's their question (and has no other questions)
+
+When they post question, tell them what will happen.  Like "watch your@email.sv for a reply from derek@sivers.org within a day".  And maybe "back to article? or pick another article?"
+
+## TODO:
+
+TRANSLATOR DATA: let them enter their name, city, country, bio, URLs, photo.  Use approval process like I do with nownownow
+SECOND REVIEWER gets different interface - showing the replacements of reviewer1!  Can one-click to put it back the way it was, or update again.  Also show all past questions about this sentence.
+
+===================
+TODO: public URL for translator: use public_id
+sivers.org/t/{peeps.people.public_id = 4 chars}
+translator name : city+country
+show urls, languages, articles translated, articles reviewed
+Then articles and books will link to these permanent URLs, and people can keep their Facebook/whatever URLs updated via me.
+===================
+
+CREATE TABLE booktitles (
+	id
+	title
+);
+
+CREATE TABLE books (
+	id
+	booktitle_id
+	format
+	lang
+	isbn
+);
+
+########## TABLES:
+
+# TABLE: translators = People logging in to do the translations.
+
+This was empty until May 2018 because before this I'd just use Gengo's API to load translations into the database, not knowing who the translators are.  That's why many old translations have no translator_id.  So this table is really for people logging into my site.
+
+Also has their language, and whether they are the 1st (translator) or 2nd (reviewer).
+So whether they are 1st or 2nd (a reviewer), they are called a translator.
+
+((Maybe some day this will allow anyone who has a correction to make themselves a translator and submit it.  And their rate per-word for translating.))
+
+
+# TABLE: collections = Website or book : a project to get translated
+
+This is so I can assign a translator to do an entire book or project.  It's mainly used so articles.collection_id can refer to it.  So I can know all the articles contained in a project.
+
+
+# TABLE: articles
+
+This is the core of what I load into the database raw from my original text file.
+
+It has a collection_id to know what book/website/project it's in.  It has a unique filename.
+
+Some functions convert the raw text into a template, extracting the [Tab]-indented lines and saving them in the sentences table.  Then translations are merged back into template.
+
+
+# TABLE: coltranes
+
+Just a join table, to assign collections to a translator.  To say, "You can choose from these."
+
+
+# TABLE: sentences
+
+The original English sentences, extracted from the article.
+
+A unique 8-character code, used in articles.template.
+A sortid to retain the sequence of the sentences for translators to do them in order.  (This could be calculated from template.)
+The sentence : my English original, but...
+
+If a sentence had HTML tags, they are replaced with just < + >, which can be nested, and original tag put into a text[] array: sentences.replacements
+The reason is so translators don't mistakenly type the wrong URL, or let curly-quotes into the HTML, or whatever.
+
+Finally, there's a comment field, which is a note from me to the translators, about translating this sentence.
+
+
+# TABLE: translations
+
+The translations created by the translator, and updated by the reviewer.
+
+Crucial are sentence_code and lang, the main locators of this translation.
+
+translated_by is saved with the translators.id when created by the translator
+reviewed_by is saved with the translators.id when a reviewer marks it as done, or creates a replacement (see next table).
+
+translation is a text field, of course.
+
+question is a field for the translator or reviewer to ask me a question.
+When they post a question here, the state is changed to "wait", which means "waiting on Derek".
+
+
+# TABLE: replaced
+
+When a translation is updated, the old translation is saved here.
+
+This is a clone of the translations table, but now the sentence_code + lang are not unique, since there could be many replacements.
+And instead of reviewed_by it's replaced_by.  And no state or question.
+
+
+
+
+Thu Sep  6 11:13:29 WEST 2018
+
+TODO:  titles instead of codes
+
+FOR THE EDITOR:
+
+Big change : this is not crowd-sourced, so no "claim".  
+
+assign_editor_book(translators.id, books.id)
+	UPDATE words.articles
+	SET final_by = $1
+	WHERE id IN (
+	)
+
+xor_articles(translators.id)
+	if roll = 9
+		select books.id
+		use get_book chapters	
+
+HOME = 
+	do = sorted array of chapters with "id" + "filename" where final_at is null
+	done = " where final_at is not null
+	entire book in English
+	entire book translated
+

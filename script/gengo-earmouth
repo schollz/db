@@ -1,0 +1,41 @@
+#!/usr/bin/env ruby
+require 'pg'
+
+db = PG::Connection.new(dbname: 'd50b', user: 'd50b')
+
+lang = 'en'
+Dir.mkdir("/tmp/#{lang}")
+File.open("/tmp/#{lang}/strings.xml", 'w') do |f|
+	qry = "SELECT code, sentence FROM words.sentences WHERE article_id = 30 ORDER BY code"
+	f.puts '<resources>'
+	db.exec(qry).each do |row|
+		f.puts '<string name="%s">%s</string>' % [
+			row['code'],
+			row['sentence'].gsub('"', '&quot;')
+		]
+	end
+	f.puts '</resources>'
+end
+
+langs = %w(fr es pt de it zh ja ru)
+
+langs.each do |lang|
+	Dir.mkdir("/tmp/#{lang}")
+	File.open("/tmp/#{lang}/strings.xml", 'w') do |f|
+		qry = "SELECT sentence_code, translation
+			FROM words.translations
+			WHERE sentence_code IN (
+				SELECT code
+				FROM words.sentences
+				WHERE article_id=30)
+			AND lang='%s' ORDER BY sentence_code" % lang
+		f.puts '<resources>'
+		db.exec(qry).each do |row|
+			f.puts '<string name="%s">%s</string>' % [
+				row['sentence_code'],
+				row['translation'].gsub('"', '&quot;')
+			]
+		end
+		f.puts '</resources>'
+	end
+end

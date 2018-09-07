@@ -1,0 +1,3 @@
+changequote(«, »)dnl
+include(«../../defs.m4»)dnl
+include(«XXX»)dnl
